@@ -220,6 +220,11 @@ struct vy_stat {
 	 */
 	struct histogram *dump_bw;
 	int64_t dump_total;
+	/* iterators statistics */
+	struct vy_iterator_stat txw_stat;
+	struct vy_iterator_stat cache_stat;
+	struct vy_iterator_stat mem_stat;
+	struct vy_iterator_stat run_stat;
 };
 
 static struct vy_stat *
@@ -4779,6 +4784,16 @@ vy_info_append_stat_latency(struct vy_info_handler *h,
 }
 
 static void
+vy_info_append_iterator_stat(struct vy_info_handler *h, const char *name,
+			     struct vy_iterator_stat *stat)
+{
+	vy_info_table_begin(h, name);
+	vy_info_append_u64(h, "lookup_count", stat->lookup_count);
+	vy_info_append_u64(h, "step_count", stat->step_count);
+	vy_info_table_end(h);
+}
+
+static void
 vy_info_append_performance(struct vy_env *env, struct vy_info_handler *h)
 {
 	struct vy_stat *stat = env->stat;
@@ -4801,6 +4816,17 @@ vy_info_append_performance(struct vy_env *env, struct vy_info_handler *h)
 	vy_info_append_u64(h, "dump_bandwidth", vy_stat_dump_bandwidth(stat));
 	vy_info_append_u64(h, "dump_total", stat->dump_total);
 	vy_info_append_u64(h, "dumped_statements", stat->dumped_statements);
+
+	struct vy_cache_env *ce = &env->cache_env;
+	vy_info_append_u64(h, "cache_count", ce->cached_count);
+	vy_info_append_u64(h, "cache_size", ce->quota.used);
+
+	vy_info_table_begin(h, "iterator stat");
+	vy_info_append_iterator_stat(h, "TX write set", &stat->txw_stat);
+	vy_info_append_iterator_stat(h, "cache", &stat->cache_stat);
+	vy_info_append_iterator_stat(h, "mem", &stat->mem_stat);
+	vy_info_append_iterator_stat(h, "run", &stat->run_stat);
+	vy_info_table_end(h);
 
 	vy_info_table_end(h);
 }
@@ -6713,6 +6739,8 @@ struct vy_run_iterator_pos {
 struct vy_run_iterator {
 	/** Parent class, must be the first member */
 	struct vy_stmt_iterator base;
+	/** Usage statistics */
+	struct vy_iterator_stat *stat;
 
 	/* Members needed for memory allocation and disk access */
 	/* index */
@@ -6755,8 +6783,9 @@ struct vy_run_iterator {
 };
 
 static void
-vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_range *range,
-		     struct vy_run *run, enum iterator_type iterator_type,
+vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_iterator_stat *stat,
+		     struct vy_range *range, struct vy_run *run,
+		     enum iterator_type iterator_type,
 		     const struct tuple *key, const int64_t *vlsn);
 
 /* }}} vy_run_iterator API forward declaration */
@@ -7302,6 +7331,7 @@ vy_run_iterator_next_pos(struct vy_run_iterator *itr,
 			 enum iterator_type iterator_type,
 			 struct vy_run_iterator_pos *pos)
 {
+	itr->stat->step_count++;
 	*pos = itr->curr_pos;
 	assert(pos->page_no < itr->run->info.count);
 	if (iterator_type == ITER_LE || iterator_type == ITER_LT) {
@@ -7446,6 +7476,7 @@ vy_run_iterator_start(struct vy_run_iterator *itr, struct tuple **ret)
 	assert(!itr->search_started);
 	itr->search_started = true;
 	*ret = NULL;
+	itr->stat->lookup_count++;
 
 	if (itr->run->info.count == 1) {
 		/* there can be a stupid bootstrap run in which it's EOF */
@@ -7528,11 +7559,13 @@ static struct vy_stmt_iterator_iface vy_run_iterator_iface;
  * Open the iterator.
  */
 static void
-vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_range *range,
-		     struct vy_run *run, enum iterator_type iterator_type,
+vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_iterator_stat *stat,
+		     struct vy_range *range, struct vy_run *run,
+		     enum iterator_type iterator_type,
 		     const struct tuple *key, const int64_t *vlsn)
 {
 	itr->base.iface = &vy_run_iterator_iface;
+	itr->stat = stat;
 
 	itr->index = range->index;
 	itr->range = range;
@@ -7769,8 +7802,11 @@ vy_run_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct tuple **ret)
  */
 static NODISCARD int
 vy_run_iterator_restore(struct vy_stmt_iterator *vitr,
-			const struct tuple *last_stmt, struct tuple **ret)
+			const struct tuple *last_stmt, struct tuple **ret,
+
+			bool *stop)
 {
+	(void)stop;
 	assert(vitr->iface->restore == vy_run_iterator_restore);
 	struct vy_run_iterator *itr = (struct vy_run_iterator *) vitr;
 	*ret = NULL;
@@ -7868,6 +7904,8 @@ static struct vy_stmt_iterator_iface vy_run_iterator_iface = {
 struct vy_txw_iterator {
 	/** Parent class, must be the first member */
 	struct vy_stmt_iterator base;
+	/** Iterator usage statistics */
+	struct vy_iterator_stat *stat;
 
 	struct vy_index *index;
 	struct vy_tx *tx;
@@ -7891,7 +7929,7 @@ struct vy_txw_iterator {
 };
 
 static void
-vy_txw_iterator_open(struct vy_txw_iterator *itr,
+vy_txw_iterator_open(struct vy_txw_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_index *index, struct vy_tx *tx,
 		     enum iterator_type iterator_type,
 		     const struct tuple *key);
@@ -7908,12 +7946,13 @@ static struct vy_stmt_iterator_iface vy_txw_iterator_iface;
 
 /* Open the iterator. */
 static void
-vy_txw_iterator_open(struct vy_txw_iterator *itr,
+vy_txw_iterator_open(struct vy_txw_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_index *index, struct vy_tx *tx,
 		     enum iterator_type iterator_type,
 		     const struct tuple *key)
 {
 	itr->base.iface = &vy_txw_iterator_iface;
+	itr->stat = stat;
 
 	itr->index = index;
 	itr->tx = tx;
@@ -7939,6 +7978,7 @@ vy_txw_iterator_open(struct vy_txw_iterator *itr,
 static void
 vy_txw_iterator_start(struct vy_txw_iterator *itr, struct tuple **ret)
 {
+	itr->stat->lookup_count++;
 	*ret = NULL;
 	itr->search_started = true;
 	itr->version = itr->tx->write_set_version;
@@ -8007,6 +8047,7 @@ vy_txw_iterator_next_key(struct vy_stmt_iterator *vitr, struct tuple **ret,
 		vy_txw_iterator_start(itr, ret);
 		return 0;
 	}
+	itr->stat->step_count++;
 	itr->version = itr->tx->write_set_version;
 	if (itr->curr_txv == NULL)
 		return 0;
@@ -8049,8 +8090,10 @@ vy_txw_iterator_next_lsn(struct vy_stmt_iterator *vitr, struct tuple **ret)
  */
 static int
 vy_txw_iterator_restore(struct vy_stmt_iterator *vitr,
-			const struct tuple *last_stmt, struct tuple **ret)
+			const struct tuple *last_stmt, struct tuple **ret,
+			bool *stop)
 {
+	(void)stop;
 	assert(vitr->iface->restore == vy_txw_iterator_restore);
 	struct vy_txw_iterator *itr = (struct vy_txw_iterator *) vitr;
 	*ret = NULL;
@@ -8326,7 +8369,7 @@ vy_merge_iterator_next_key(struct vy_merge_iterator *itr, struct tuple **ret)
 		} else  {
 			rc = src->iterator.iface->restore(&src->iterator,
 							  itr->curr_stmt,
-							  &src->stmt);
+							  &src->stmt, &stop);
 			rc = rc > 0 ? 0 : rc;
 		}
 		if (vy_merge_iterator_check_version(itr))
@@ -8382,7 +8425,7 @@ vy_merge_iterator_next_key(struct vy_merge_iterator *itr, struct tuple **ret)
 		struct vy_merge_src *src = &itr->src[i];
 		rc = src->iterator.iface->restore(&src->iterator,
 						  itr->curr_stmt,
-						  &src->stmt);
+						  &src->stmt, NULL);
 		if (vy_merge_iterator_check_version(itr))
 			return -2;
 		if (rc < 0)
@@ -8540,7 +8583,7 @@ vy_merge_iterator_restore(struct vy_merge_iterator *itr,
 	for (uint32_t i = 0; i < itr->src_count; i++) {
 		struct vy_stmt_iterator *sub_itr = &itr->src[i].iterator;
 		int rc = sub_itr->iface->restore(sub_itr, last_stmt,
-						 &itr->src[i].stmt);
+						 &itr->src[i].stmt, NULL);
 		if (rc < 0)
 			return rc;
 		result = result || rc;
@@ -8668,6 +8711,10 @@ struct vy_write_iterator {
 	struct tuple *key;
 	struct tuple *tmp_stmt;
 	struct vy_merge_iterator mi;
+	/* Usage statistics of mem iterators */
+	struct vy_iterator_stat mem_iterator_stat;
+	/* Usage statistics of run iterators */
+	struct vy_iterator_stat run_iterator_stat;
 };
 
 /*
@@ -8708,8 +8755,8 @@ vy_write_iterator_add_run(struct vy_write_iterator *wi,
 	if (src == NULL)
 		return -1;
 	static const int64_t vlsn = INT64_MAX;
-	vy_run_iterator_open(&src->run_iterator, range, run,
-			     ITER_GE, wi->key, &vlsn);
+	vy_run_iterator_open(&src->run_iterator, &wi->run_iterator_stat,
+			     range, run, ITER_GE, wi->key, &vlsn);
 	return 0;
 }
 
@@ -8721,8 +8768,8 @@ vy_write_iterator_add_mem(struct vy_write_iterator *wi, struct vy_mem *mem)
 	if (src == NULL)
 		return -1;
 	static const int64_t vlsn = INT64_MAX;
-	vy_mem_iterator_open(&src->mem_iterator, mem,
-			     ITER_GE, wi->key, &vlsn);
+	vy_mem_iterator_open(&src->mem_iterator, &wi->mem_iterator_stat,
+			     mem, ITER_GE, wi->key, &vlsn);
 	return 0;
 }
 
@@ -8831,12 +8878,13 @@ static void
 vy_read_iterator_add_tx(struct vy_read_iterator *itr)
 {
 	assert(itr->tx != NULL);
+	struct vy_iterator_stat *stat = &itr->index->env->stat->txw_stat;
 	struct vy_merge_src *sub_src =
 		vy_merge_iterator_add(&itr->merge_iterator, true, false);
-	vy_txw_iterator_open(&sub_src->txw_iterator, itr->index, itr->tx,
+	vy_txw_iterator_open(&sub_src->txw_iterator, stat, itr->index, itr->tx,
 			     itr->iterator_type, itr->key);
 	vy_txw_iterator_restore(&sub_src->iterator, itr->curr_stmt,
-				&sub_src->stmt);
+				&sub_src->stmt, NULL);
 }
 
 static void
@@ -8844,11 +8892,14 @@ vy_read_iterator_add_cache(struct vy_read_iterator *itr)
 {
 	struct vy_merge_src *sub_src =
 		vy_merge_iterator_add(&itr->merge_iterator, true, false);
-	vy_cache_iterator_open(&sub_src->cache_iterator, itr->index->cache,
-			       itr->iterator_type, itr->key, itr->vlsn);
+	struct vy_iterator_stat *stat = &itr->index->env->stat->cache_stat;
+	vy_cache_iterator_open(&sub_src->cache_iterator, stat,
+			       itr->index->cache, itr->iterator_type,
+			       itr->key, itr->vlsn);
+	bool stop = false;
 	int rc = sub_src->iterator.iface->restore(&sub_src->iterator,
 						  itr->curr_stmt,
-						  &sub_src->stmt);
+						  &sub_src->stmt, &stop);
 	(void)rc;
 }
 
@@ -8860,6 +8911,7 @@ vy_read_iterator_add_mem(struct vy_read_iterator *itr)
 
 	assert(range != NULL);
 	assert(range->shadow == NULL);
+	struct vy_iterator_stat *stat = &itr->index->env->stat->mem_stat;
 	/*
 	 * The range may be in the middle of split, in which case we
 	 * must add active in-memory indexes of new ranges first.
@@ -8869,14 +8921,14 @@ vy_read_iterator_add_mem(struct vy_read_iterator *itr)
 		assert(rlist_empty(&r->frozen));
 		sub_src = vy_merge_iterator_add(&itr->merge_iterator,
 						true, true);
-		vy_mem_iterator_open(&sub_src->mem_iterator, r->mem,
+		vy_mem_iterator_open(&sub_src->mem_iterator, stat , r->mem,
 				     itr->iterator_type, itr->key, itr->vlsn);
 	}
 	/* Add the active in-memory index of the current range. */
 	if (range->mem != NULL) {
 		sub_src = vy_merge_iterator_add(&itr->merge_iterator,
 						true, true);
-		vy_mem_iterator_open(&sub_src->mem_iterator, range->mem,
+		vy_mem_iterator_open(&sub_src->mem_iterator, stat , range->mem,
 				     itr->iterator_type, itr->key, itr->vlsn);
 	}
 	/* Add frozen in-memory indexes. */
@@ -8884,7 +8936,7 @@ vy_read_iterator_add_mem(struct vy_read_iterator *itr)
 	rlist_foreach_entry(mem, &range->frozen, in_frozen) {
 		sub_src = vy_merge_iterator_add(&itr->merge_iterator,
 						false, true);
-		vy_mem_iterator_open(&sub_src->mem_iterator, mem,
+		vy_mem_iterator_open(&sub_src->mem_iterator, stat , mem,
 				     itr->iterator_type, itr->key, itr->vlsn);
 	}
 }
@@ -8894,11 +8946,13 @@ vy_read_iterator_add_disk(struct vy_read_iterator *itr)
 {
 	assert(itr->curr_range != NULL);
 	assert(itr->curr_range->shadow == NULL);
+	struct vy_iterator_stat *stat = &itr->index->env->stat->run_stat;
 	struct vy_run *run;
 	rlist_foreach_entry(run, &itr->curr_range->runs, in_range) {
 		struct vy_merge_src *sub_src = vy_merge_iterator_add(
 			&itr->merge_iterator, false, true);
-		vy_run_iterator_open(&sub_src->run_iterator, itr->curr_range,
+		vy_run_iterator_open(&sub_src->run_iterator, stat,
+				     itr->curr_range,
 				     run, itr->iterator_type, itr->key,
 				     itr->vlsn);
 	}

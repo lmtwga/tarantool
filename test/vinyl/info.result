@@ -82,6 +82,8 @@ box_info_sort(box.info.vinyl())
   - metric:
     - lsn: 5
   - performance:
+    - cache_count: <count>
+    - cache_size: <size>
     - cursor:
       - rps: <rps>
       - total: <total>
@@ -100,6 +102,19 @@ box_info_sort(box.info.vinyl())
     - get_latency:
       - avg: <avg>
       - max: <max>
+    - iterator stat:
+      - TX write set:
+        - lookup_count: <count>
+        - step_count: <count>
+      - cache:
+        - lookup_count: <count>
+        - step_count: <count>
+      - mem:
+        - lookup_count: <count>
+        - step_count: <count>
+      - run:
+        - lookup_count: <count>
+        - step_count: <count>
     - tx:
       - rps: <rps>
       - total: <total>
