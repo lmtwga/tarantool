@@ -151,6 +151,43 @@ static const char *lua_modules[] = {
  * {{{ box Lua library: common functions
  */
 
+static int
+int64_rconv(int64_t origin, int base, int64_t *rv) {
+	int64_t result = 0, cbase = 1;
+	int sign = 1;
+	if (origin < 0)
+		origin *= (sign = -1);
+
+	while (origin > 0) {
+		int digit = (origin % 10);
+		if (digit >= base) {
+			return -1;
+		}
+		result += cbase * digit;
+		origin /= 10;
+		cbase = cbase * base;
+	}
+	*rv = result * sign;
+	return 0;
+}
+
+static int
+uint64_rconv(uint64_t origin, int base, uint64_t *rv) {
+	uint64_t result = 0, cbase = 1;
+
+	while (origin > 0) {
+		int digit = (origin % 10);
+		if (digit >= base) {
+			return -1;
+		}
+		result += cbase * digit;
+		origin /= 10;
+		cbase = cbase * base;
+	}
+	*rv = result;
+	return 0;
+}
+
 /**
  * Convert lua number or string to lua cdata 64bit number.
  */
@@ -162,17 +199,105 @@ lbox_tonumber64(struct lua_State *L)
 	luaL_argcheck(L, (2 <= base && base <= 36) || base == -1, 2,
 		      "base out of range");
 
+	uint32_t ctypeid = 0;
+	size_t argl = 0;
+	const char *arg = NULL;
+
 	switch (lua_type(L, 1)) {
+	case LUA_TCDATA:
+		base = (base == -1 ? 10 : base);
+		void *cdata = luaL_checkcdata(L, 1, &ctypeid);
+		if (ctypeid < CTID_INT8 || ctypeid > CTID_DOUBLE) {
+			break;
+		} else if (base == 10) {
+			lua_pushvalue(L, 1);
+			return 1;
+		} else {
+			int type = MP_INT;
+			uint64_t uval = 0;
+			int64_t  ival = 0;
+			switch (ctypeid) {
+			case CTID_CCHAR:
+			case CTID_INT8:
+				ival = *(int8_t *) cdata;
+				break;
+			case CTID_INT16:
+				ival = *(int16_t *) cdata;
+				break;
+			case CTID_INT32:
+				ival = *(int32_t *) cdata;
+				break;
+			case CTID_INT64:
+				ival = *(int64_t *) cdata;
+				break;
+			case CTID_UINT8:
+				type = MP_UINT;
+				uval = *(uint8_t *) cdata;
+				break;
+			case CTID_UINT16:
+				type = MP_UINT;
+				uval = *(uint16_t *) cdata;
+				break;
+			case CTID_UINT32:
+				type = MP_UINT;
+				uval = *(uint32_t *) cdata;
+				break;
+			case CTID_UINT64:
+				type = MP_UINT;
+				uval = *(uint64_t *) cdata;
+				break;
+			case CTID_FLOAT:
+			{
+				float fval = *(float *) cdata;
+				if (!isfinite(fval) || base != 10) {
+					type = -1;
+				} else if (fval > 0) {
+					ival = ceilf(fval);
+				} else {
+					uval = floorf(fval);
+					type = MP_UINT;
+				}
+				break;
+			}
+			case CTID_DOUBLE:
+			{
+				double dval = *(double *) cdata;
+				if (!isfinite(dval) || base != 10) {
+					type = -1;
+				} else if (dval > 0) {
+					ival = ceil(dval);
+				} else {
+					uval = floor(dval);
+					type = MP_UINT;
+				}
+				break;
+			}
+			}
+			if (type == MP_INT) {
+				int64_t result = 0;
+				if (int64_rconv(ival, base, &result) == -1)
+					break;
+				luaL_pushint64(L, result);
+			} else if (type == MP_UINT) {
+				uint64_t result = 0;
+				if (uint64_rconv(uval, base, &result) == -1)
+					break;
+				luaL_pushuint64(L, result);
+			}
+			if (type == -1) {
+				break;
+			}
+			return 1;
+		}
+		break;
 	case LUA_TNUMBER:
-		if (base == -1 || base == 10) {
-			if (base == 10)
-				lua_pop(L, 1);
+		base = (base == -1 ? 10 : base);
+		if (base == 10) {
+			lua_pushvalue(L, 1);
 			return 1;
 		}
 	case LUA_TSTRING:
-	{
-		size_t argl = 0;
-		const char *arg = luaL_checklstring(L, 1, &argl);
+		arg = luaL_checklstring(L, 1, &argl);
 		/* Trim whitespaces at begin/end */
 		while (argl > 0 && isspace(arg[argl - 1])) {
 			argl--;
@@ -217,17 +342,6 @@ lbox_tonumber64(struct lua_State *L)
 			return 1;
 		}
 		break;
-	}
-	case LUA_TCDATA:
-	{
-		uint32_t ctypeid = 0;
-		luaL_checkcdata(L, 1, &ctypeid);
-		if (ctypeid >= CTID_INT8 && ctypeid <= CTID_DOUBLE) {
-			lua_pushvalue(L, 1);
-			return 1;
-		}
-		break;
-	}
 	}
 	lua_pushnil(L);
 	return 1;

@@ -652,6 +652,42 @@ tonumber64(" -0b11 ")
 ---
 - -3
 ...
+tonumber64(1LL)
+---
+- 1
+...
+tonumber64(100LL)
+---
+- 100
+...
+tonumber64(100LL, 10)
+---
+- 100
+...
+tonumber64(100LL, 2)
+---
+- 4
+...
+tonumber64(-100LL, 2)
+---
+- -4
+...
+tonumber64(100ULL, 2)
+---
+- 4
+...
+tonumber64(32ULL, 5)
+---
+- 17
+...
+tonumber64(32LL, 3)
+---
+- null
+...
+tonumber64(32ULL, 3)
+---
+- null
+...
 --  dostring()
 dostring('abc')
 ---
