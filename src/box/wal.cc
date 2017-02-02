@@ -607,7 +607,7 @@ wal_writer_f(va_list ap)
 	struct cbus_endpoint endpoint;
 	cbus_join(&endpoint, "wal", wal_wakeup, fiber());
 	/* Create a pipe to TX thread. */
-	cpipe_create(&wal_writer_singleton.tx_pipe, "tx");
+	cpipe_create(&wal_writer_singleton.tx_pipe, "tx_wake");
 
 	while (!writer->exiting && !fiber_is_cancelled()) {
 		struct stailq output;
