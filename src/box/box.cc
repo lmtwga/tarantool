@@ -1451,11 +1451,11 @@ bootstrap(struct vclock *start_vclock)
 }
 
 static void
-box_tx_wake(struct ev_loop *loop, struct ev_async *async, int events)
+box_tx_wake(struct ev_loop *loop, ev_watcher *watcher, int events)
 {
 	(void) loop;
 	(void) events;
-	struct cbus_endpoint *endpoint = (struct cbus_endpoint *)async->data;
+	struct cbus_endpoint *endpoint = (struct cbus_endpoint *)watcher->data;
 	struct stailq output;
 	stailq_create(&output);
 	cbus_endpoint_fetch(endpoint, &output);
