@@ -204,7 +204,6 @@ local repl_mt = {
 -- REPL = read-eval-print-loop
 --
 local function repl(self)
-    
     fiber.self().storage.console = self
     if type(self.on_start) == 'function' then
         self:on_start()
@@ -379,7 +378,7 @@ local function listen(uri)
     return s
 end
 
-return {
+package.loaded['console'] = {
     start = start;
     eval = eval;
     delimiter = delimiter;
