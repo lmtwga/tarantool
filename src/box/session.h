@@ -142,9 +142,6 @@ extern struct rlist session_on_disconnect;
 void
 session_storage_cleanup(int sid);
 
-#if defined(__cplusplus)
-} /* extern "C" */
-
 /**
  * Create a session.
  * Invokes a Lua trigger box.session.on_connect if it is
@@ -172,12 +169,15 @@ void
 session_destroy(struct session *);
 
 /** Run on-connect triggers */
-void
+int
 session_run_on_connect_triggers(struct session *session);
 
 /** Run on-disconnect triggers */
-void
+int
 session_run_on_disconnect_triggers(struct session *session);
+
+#if defined(__cplusplus)
+} /* extern "C" */
 
 void
 session_run_on_auth_triggers(const char *user_name);

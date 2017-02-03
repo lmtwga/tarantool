@@ -32,6 +32,7 @@
 #include "box/lua/console.h"
 #include "lua/utils.h"
 #include "lua/fiber.h"
+#include "box/session.h"
 #include "fiber.h"
 #include "coio.h"
 #include <lua.h>
@@ -321,15 +322,98 @@ lbox_console_add_history(struct lua_State *L)
 	add_history(lua_tostring(L, 1));
 	return 0;
 }
+uint32_t CTID_CONST_STRUCT_SESSION_REF;
+
+static inline struct session *
+lua_checksession(struct lua_State *L, int narg)
+{
+	assert(CTID_CONST_STRUCT_SESSION_REF != 0);
+	uint32_t ctypeid;
+	void *data;
+
+	if (lua_type(L, narg) != LUA_TCDATA)
+		return NULL;
+
+	data = luaL_checkcdata(L, narg, &ctypeid);
+	if (ctypeid != CTID_CONST_STRUCT_SESSION_REF)
+		return NULL;
+
+	if (data == NULL)  {
+		luaL_error(L, "Invalid argument #%d (session expected, got %s)",
+		           narg, lua_typename(L, lua_type(L, narg)));
+	}
+
+	return *(struct session **)data;
+}
+
+static inline int
+lbox_session_gc(struct lua_State *L)
+{
+	struct session *s = lua_checksession(L, 1);
+	session_destroy(s);
+	return 0;
+}
+
+static inline void
+lua_pushsession(struct lua_State *L, struct session *s)
+{
+	assert(CTID_CONST_STRUCT_SESSION_REF != 0);
+	struct session **ptr = (struct session **)
+		luaL_pushcdata(L, CTID_CONST_STRUCT_SESSION_REF);
+	*ptr = s;
+	lua_pushcfunction(L, lbox_session_gc);
+	luaL_setcdatagc(L, -2);
+}
+
+/* Create session and pin it to fiber */
+static int
+lbox_console_session_create(struct lua_State *L)
+{
+	int fd = luaL_checkinteger(L, 1);
+	struct session *s = session_create(fd);
+	credentials_init(&s->credentials, ADMIN, ADMIN);
+	if (s == NULL)
+		return luaT_error(L);
+	fiber_set_session(fiber(), s);
+	fiber_set_user(fiber(), &s->credentials);
+	say_info("creating session: %p", (void *)s);
+	lua_pushsession(L, s);
+	return 1;
+}
+
+static int
+lbox_console_session_exec_on_connect(struct lua_State *L)
+{
+	struct session *s = lua_checksession(L, 1);
+	say_info("exec on connect session: %p", (void *)s);
+	if (!rlist_empty(&session_on_connect))
+		if (session_run_on_connect_triggers(s) == -1)
+			luaT_error(L);
+	return 0;
+}
+
+static int
+lbox_console_session_exec_on_disconnect(struct lua_State *L)
+{
+	struct session *s = lua_checksession(L, -1);
+	say_info("exec on disconnect session: %p", (void *)s);
+	if (!rlist_empty(&session_on_disconnect))
+		if (session_run_on_disconnect_triggers(s) == -1)
+			luaT_error(L);
+	return 0;
+}
 
 void
 tarantool_lua_console_init(struct lua_State *L)
 {
 	static const struct luaL_reg consolelib[] = {
-		{"load_history",       lbox_console_load_history},
-		{"save_history",       lbox_console_save_history},
-		{"add_history",        lbox_console_add_history},
-		{"completion_handler", lbox_console_completion_handler},
+		{"session_create",             lbox_console_session_create},
+		{"session_exec_on_connect",    lbox_console_session_exec_on_connect},
+		{"session_exec_on_disconnect", lbox_console_session_exec_on_disconnect},
+		{"load_history",               lbox_console_load_history},
+		{"save_history",               lbox_console_save_history},
+		{"add_history",                lbox_console_add_history},
+		{"completion_handler",         lbox_console_completion_handler},
 		{NULL, NULL}
 	};
 	luaL_register_module(L, "console", consolelib);
@@ -338,6 +422,12 @@ tarantool_lua_console_init(struct lua_State *L)
 	lua_getfield(L, -1, "completion_handler");
 	lua_pushcclosure(L, lbox_console_readline, 1);
 	lua_setfield(L, -2, "readline");
+
+	/* Get CTypeID for `struct session' */
+	int rc = luaL_cdef(L, "struct session;");
+	assert(rc == 0); (void) rc;
+	CTID_CONST_STRUCT_SESSION_REF = luaL_ctypeid(L, "const struct session &");
+	assert(CTID_CONST_STRUCT_SESSION_REF != 0);
 }
 
 /*

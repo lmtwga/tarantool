@@ -28,10 +28,11 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include "session.h"
+#include "box/session.h"
 #include "fiber.h"
 #include "memory.h"
 
+#include "user_def.h"
 #include "assoc.h"
 #include "trigger.h"
 #include "random.h"
@@ -73,27 +74,32 @@ session_on_stop(struct trigger *trigger, void * /* event */)
 struct session *
 session_create(int fd)
 {
-	struct session *session = (struct session *)
-		mempool_alloc_xc(&session_pool);
-	session->id = sid_max();
-	session->fd =  fd;
-	session->sync = 0;
+	struct session *s = (struct session *)mempool_alloc(&session_pool);
+	if (s == NULL) {
+		diag_set(OutOfMemory, session_pool.objsize, "mempool",
+			 "new slab");
+		return NULL;
+	}
+	s->id = sid_max();
+	s->fd =  fd;
+	s->sync = 0;
 	/* For on_connect triggers. */
-	credentials_init(&session->credentials, guest_user->auth_token,
+	credentials_init(&s->credentials, guest_user->auth_token,
 			 guest_user->def.uid);
 	if (fd >= 0)
-		random_bytes(session->salt, SESSION_SEED_SIZE);
+		random_bytes(s->salt, SESSION_SEED_SIZE);
 	struct mh_i32ptr_node_t node;
-	node.key = session->id;
-	node.val = session;
+	node.key = s->id;
+	node.val = s;
 
 	mh_int_t k = mh_i32ptr_put(session_registry, &node, NULL, NULL);
 
 	if (k == mh_end(session_registry)) {
-		mempool_free(&session_pool, session);
-		tnt_raise(OutOfMemory, 0, "session hash", "new session");
+		mempool_free(&session_pool, s);
+		diag_set(OutOfMemory, 0, "session hash", "new session");
+		return NULL;
 	}
-	return session;
+	return s;
 }
 
 struct session *
@@ -101,6 +107,8 @@ session_create_on_demand()
 {
 	/* Create session on demand */
 	struct session *s = session_create(-1);
+	if (s == NULL)
+		return NULL;
 	s->fiber_on_stop = {
 		RLIST_LINK_INITIALIZER, session_on_stop, NULL, NULL
 	};
@@ -119,7 +127,7 @@ session_create_on_demand()
  */
 struct credentials admin_credentials;
 
-void
+int
 session_run_on_disconnect_triggers(struct session *session)
 {
 	struct fiber *fiber = fiber();
@@ -132,17 +140,23 @@ session_run_on_disconnect_triggers(struct session *session)
 		e->log();
 	}
 	session_storage_cleanup(session->id);
+	return 0;
 }
 
-void
+int
 session_run_on_connect_triggers(struct session *session)
 {
 	/* Run on_connect with admin credentals */
 	struct fiber *fiber = fiber();
 	fiber_set_session(fiber, session);
 	fiber_set_user(fiber, &admin_credentials);
-	trigger_run(&session_on_connect, NULL);
+	try {
+		trigger_run(&session_on_connect, NULL);
+	} catch (Exception *) {
+		return -1;
+	}
 	/* Set session user to guest, until it is authenticated. */
+	return 0;
 }
 
 void
@@ -176,8 +190,7 @@ session_init()
 	if (session_registry == NULL)
 		panic("out of memory");
 	mempool_create(&session_pool, &cord()->slabc, sizeof(struct session));
-	credentials_init(&admin_credentials, admin_user->auth_token,
-			 admin_user->def.uid);
+	credentials_init(&admin_credentials, ADMIN, ADMIN);
 	/**
 	 * When session_init() is called, admin user access is not
 	 * loaded yet (is 0), force global access.
