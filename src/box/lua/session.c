@@ -123,7 +123,7 @@ lbox_session_su(struct lua_State *L)
 		luaT_error(L);
 	struct credentials orig_cr;
 	credentials_copy(&orig_cr, &session->credentials);
-	credentials_init(&session->credentials, user);
+	credentials_init(&session->credentials, user->auth_token, user->def.uid);
 	if (top == 1)
 		return 0; /* su */
 

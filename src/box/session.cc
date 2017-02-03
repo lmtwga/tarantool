@@ -79,7 +79,8 @@ session_create(int fd)
 	session->fd =  fd;
 	session->sync = 0;
 	/* For on_connect triggers. */
-	credentials_init(&session->credentials, guest_user);
+	credentials_init(&session->credentials, guest_user->auth_token,
+			 guest_user->def.uid);
 	if (fd >= 0)
 		random_bytes(session->salt, SESSION_SEED_SIZE);
 	struct mh_i32ptr_node_t node;
@@ -105,7 +106,8 @@ session_create_on_demand()
 	};
 	/* Add a trigger to destroy session on fiber stop */
 	trigger_add(&fiber()->on_stop, &s->fiber_on_stop);
-	credentials_init(&s->credentials, admin_user);
+	credentials_init(&s->credentials, admin_user->auth_token,
+			 admin_user->def.uid);
 	fiber_set_session(fiber(), s);
 	fiber_set_user(fiber(), &s->credentials);
 	return s;
@@ -174,7 +176,8 @@ session_init()
 	if (session_registry == NULL)
 		panic("out of memory");
 	mempool_create(&session_pool, &cord()->slabc, sizeof(struct session));
-	credentials_init(&admin_credentials, admin_user);
+	credentials_init(&admin_credentials, admin_user->auth_token,
+			 admin_user->def.uid);
 	/**
 	 * When session_init() is called, admin user access is not
 	 * loaded yet (is 0), force global access.

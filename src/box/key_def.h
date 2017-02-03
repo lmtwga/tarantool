@@ -375,6 +375,15 @@ struct space_def {
 	struct space_opts opts;
 };
 
+/** Global grants. */
+struct universe {
+	/** Global privileges this user has on the universe. */
+	struct access access[BOX_USER_MAX];
+};
+
+/** A single instance of the universe. */
+extern struct universe universe;
+
 /**
  * API of C stored function.
  */
@@ -522,6 +531,20 @@ key_mp_type_validate(enum field_type key_type, enum mp_type mp_type,
 		return -1;
 	}
 	return 0;
+}
+
+static inline void
+credentials_init(struct credentials *cr, uint8_t auth_token, uint32_t uid)
+{
+	cr->auth_token = auth_token;
+	cr->universal_access = universe.access[cr->auth_token].effective;
+	cr->uid = uid;
+}
+
+static inline void
+credentials_copy(struct credentials *dst, struct credentials *src)
+{
+	*dst = *src;
 }
 
 #if defined(__cplusplus)

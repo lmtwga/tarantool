@@ -38,15 +38,6 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
-/** Global grants. */
-struct universe {
-	/** Global privileges this user has on the universe. */
-	struct access access[BOX_USER_MAX];
-};
-
-/** A single instance of the universe. */
-extern struct universe universe;
-
 /** Bitmap type for used/unused authentication token map. */
 typedef unsigned int umap_int_t;
 enum {

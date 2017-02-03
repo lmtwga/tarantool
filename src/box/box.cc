@@ -1003,7 +1003,8 @@ box_process_call(struct request *request, struct obuf *out)
 			 * system spaces from a snapshot).
 			 */
 			struct user *owner = user_find_xc(func->def.uid);
-			credentials_init(&func->owner_credentials, owner);
+			credentials_init(&func->owner_credentials,
+					 owner->auth_token, owner->def.uid);
 		}
 		fiber_set_user(fiber(), &func->owner_credentials);
 	}
