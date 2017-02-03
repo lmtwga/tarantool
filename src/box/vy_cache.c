@@ -72,6 +72,8 @@ vy_cache_entry_new(struct vy_cache_env *env, struct vy_cache *cache,
 	entry->cache = cache;
 	entry->stmt = stmt;
 	entry->flags = 0;
+	entry->left_boundary_level = UCHAR_MAX;
+	entry->right_boundary_level = UCHAR_MAX;
 	rlist_add(&env->cache_lru, &entry->in_lru);
 	size_t use = sizeof(struct vy_cache_entry) + tuple_size(stmt);
 	vy_quota_force_use(&env->quota, use);
@@ -196,13 +198,35 @@ vy_cache_gc(struct vy_cache_env *env)
 
 void
 vy_cache_add(struct vy_cache *cache, struct tuple *stmt,
-	     struct tuple *prev_stmt, int direction)
+	     struct tuple *prev_stmt, const struct tuple *key,
+	     enum iterator_type order)
 {
-	assert(vy_stmt_type(stmt) == IPROTO_REPLACE);
-	assert(direction == 1 || direction == -1);
-
 	/* Delete some entries if quota overused */
 	vy_cache_gc(cache->env);
+
+	int direction = iterator_direction(order);
+	unsigned char boundary_level = UCHAR_MAX;
+	if (prev_stmt == NULL) {
+		if (order == ITER_EQ || order == ITER_GE || order == ITER_LE)
+			boundary_level = tuple_field_count(key);
+		else
+			boundary_level = cache->key_def->part_count;
+	}
+	if (stmt == NULL) {
+		if (prev_stmt == NULL)
+			return;
+		direction = -direction;
+		struct tuple *tmp = stmt;
+		stmt = prev_stmt;
+		prev_stmt = tmp;
+		if (order == ITER_EQ)
+			boundary_level = tuple_field_count(key);
+		else
+			boundary_level = 0;
+	}
+
+	assert(vy_stmt_type(stmt) == IPROTO_REPLACE);
+	assert(prev_stmt == NULL || vy_stmt_type(prev_stmt) == IPROTO_REPLACE);
 	cache->version++;
 
 	/* Insert/replace new entry to the tree */
@@ -220,8 +244,14 @@ vy_cache_add(struct vy_cache *cache, struct tuple *stmt,
 	}
 	if (replaced != NULL) {
 		entry->flags = replaced->flags;
+		entry->left_boundary_level = replaced->left_boundary_level;
+		entry->right_boundary_level = replaced->right_boundary_level;
 		vy_cache_entry_delete(cache->env, replaced);
 	}
+	if (direction > 0 && boundary_level < entry->left_boundary_level)
+		entry->left_boundary_level = boundary_level;
+	else if (direction < 0 && boundary_level < entry->right_boundary_level)
+		entry->right_boundary_level = boundary_level;
 
 	/* Done if it's not a chain */
 	if (prev_stmt == NULL)
@@ -248,6 +278,8 @@ vy_cache_add(struct vy_cache *cache, struct tuple *stmt,
 	}
 	if (replaced != NULL) {
 		prev_entry->flags = replaced->flags;
+		prev_entry->left_boundary_level = replaced->left_boundary_level;
+		prev_entry->right_boundary_level = replaced->right_boundary_level;
 		vy_cache_entry_delete(cache->env, replaced);
 	}
 
@@ -337,7 +369,7 @@ vy_cache_iterator_start(struct vy_cache_iterator *itr, struct tuple **ret,
 				vy_cache_tree_lower_bound(tree, key, &exact) :
 				vy_cache_tree_upper_bound(tree, key, &exact);
 		if (itr->iterator_type == ITER_EQ && !exact)
-			return 1;
+			return 0;
 	} else if (itr->iterator_type == ITER_LE) {
 		itr->curr_pos = vy_cache_tree_invalid_iterator();
 	} else {
@@ -357,6 +389,14 @@ vy_cache_iterator_start(struct vy_cache_iterator *itr, struct tuple **ret,
 	if (dir > 0 && ((*entry)->flags & VY_CACHE_LEFT_LINKED))
 		*stop = true;
 	else if (dir < 0 && ((*entry)->flags & VY_CACHE_RIGHT_LINKED))
+		*stop = true;
+	bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+			  (tuple_field_count(itr->key) == 0 &&
+			   itr->iterator_type == ITER_GE);
+	unsigned char key_level = tuple_field_count(itr->key);
+	if (dir > 0 && iter_is_eq && (*entry)->left_boundary_level <= key_level)
+		*stop = true;
+	else if (dir < 0 && iter_is_eq && (*entry)->right_boundary_level <= key_level)
 		*stop = true;
 
 	while (vy_stmt_lsn(candidate) > *itr->vlsn) {
@@ -430,6 +470,7 @@ vy_cache_iterator_next_key(struct vy_stmt_iterator *vitr,
 	itr->stat->step_count++;
 
 	struct vy_cache_tree *tree = &itr->cache->cache_tree;
+	int dir = iterator_direction(itr->iterator_type);
 	const struct tuple *key = itr->key;
 
 	bool step_was_made;
@@ -437,14 +478,30 @@ vy_cache_iterator_next_key(struct vy_stmt_iterator *vitr,
 	if (!itr->curr_stmt) /* End of search. */
 		return 0;
 	if (!step_was_made) {
+		struct vy_cache_entry **entry =
+			vy_cache_tree_iterator_get_elem(tree, &itr->curr_pos);
+
 		tuple_unref(itr->curr_stmt);
 		itr->curr_stmt = NULL;
-		if (iterator_direction(itr->iterator_type) > 0)
+		if (dir > 0)
 			vy_cache_tree_iterator_next(tree, &itr->curr_pos);
 		else
 			vy_cache_tree_iterator_prev(tree, &itr->curr_pos);
-		if (vy_cache_tree_iterator_is_invalid(&itr->curr_pos))
+		if (vy_cache_tree_iterator_is_invalid(&itr->curr_pos)) {
+			bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+					  (tuple_field_count(itr->key) == 0 &&
+					   itr->iterator_type == ITER_GE);
+			unsigned char key_level = tuple_field_count(itr->key);
+			if (dir > 0 && ((*entry)->flags & VY_CACHE_RIGHT_LINKED))
+				*stop = true;
+			else if (dir < 0 && ((*entry)->flags & VY_CACHE_LEFT_LINKED))
+				*stop = true;
+			if (dir > 0 && iter_is_eq && (*entry)->right_boundary_level <= key_level)
+				*stop = true;
+			else if (dir < 0 && iter_is_eq && (*entry)->left_boundary_level <= key_level)
+				*stop = true;
 			return 0;
+		}
 		itr->curr_stmt = vy_cache_iterator_curr_stmt(itr);
 		tuple_ref(itr->curr_stmt);
 	}
@@ -453,14 +510,35 @@ vy_cache_iterator_next_key(struct vy_stmt_iterator *vitr,
 	    vy_stmt_compare(itr->key, itr->curr_stmt, itr->cache->key_def)) {
 		tuple_unref(itr->curr_stmt);
 		itr->curr_stmt = NULL;
+		struct vy_cache_entry **entry =
+			vy_cache_tree_iterator_get_elem(tree, &itr->curr_pos);
+		bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+				  (tuple_field_count(itr->key) == 0 &&
+				   itr->iterator_type == ITER_GE);
+		unsigned char key_level = tuple_field_count(itr->key);
+		if (dir > 0 && ((*entry)->flags & VY_CACHE_RIGHT_LINKED))
+			*stop = true;
+		else if (dir < 0 && ((*entry)->flags & VY_CACHE_LEFT_LINKED))
+			*stop = true;
+		if (dir > 0 && iter_is_eq && (*entry)->right_boundary_level <= key_level)
+			*stop = true;
+		else if (dir < 0 && iter_is_eq && (*entry)->left_boundary_level <= key_level)
+			*stop = true;
 		return 0;
 	}
 	struct vy_cache_entry **entry =
 		vy_cache_tree_iterator_get_elem(tree, &itr->curr_pos);
-	int dir = iterator_direction(itr->iterator_type);
 	if (dir > 0 && ((*entry)->flags & VY_CACHE_LEFT_LINKED))
 		*stop = true;
 	else if (dir < 0 && ((*entry)->flags & VY_CACHE_RIGHT_LINKED))
+		*stop = true;
+	bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+			  (tuple_field_count(itr->key) == 0 &&
+			   itr->iterator_type == ITER_GE);
+	unsigned char key_level = tuple_field_count(itr->key);
+	if (dir > 0 && iter_is_eq && (*entry)->left_boundary_level <= key_level)
+		*stop = true;
+	else if (dir < 0 && iter_is_eq && (*entry)->right_boundary_level <= key_level)
 		*stop = true;
 
 	while (vy_stmt_lsn(itr->curr_stmt) > *itr->vlsn) {
@@ -523,10 +601,30 @@ vy_cache_iterator_restore(struct vy_stmt_iterator *vitr,
 	int dir = iterator_direction(itr->iterator_type);
 
 	if (itr->search_started) {
-		if (last_stmt == NULL)
+		if (itr->curr_stmt == NULL)
 			return 0;
 		int rc = 0;
 		struct vy_cache_tree_iterator pos = itr->curr_pos;
+		if (last_stmt == NULL && itr->curr_stmt != NULL) {
+			struct vy_cache_entry **e;
+			e = vy_cache_tree_iterator_get_elem(tree, &pos);
+			if (e && dir > 0 && ((*e)->flags & VY_CACHE_LEFT_LINKED))
+				*stop = true;
+			else if (e && dir < 0 && ((*e)->flags & VY_CACHE_RIGHT_LINKED))
+				*stop = true;
+			bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+					  (tuple_field_count(itr->key) == 0 &&
+					   itr->iterator_type == ITER_GE);
+			unsigned char key_level = tuple_field_count(itr->key);
+			if (e && dir > 0 && iter_is_eq && (*e)->left_boundary_level <= key_level)
+				*stop = true;
+			else if (e && dir < 0 && iter_is_eq && (*e)->right_boundary_level <= key_level)
+				*stop = true;
+			*ret = itr->curr_stmt;
+			return 0;
+		}
+		if (itr->version == itr->cache->version)
+			return 0;
 		while (true) {
 			if (dir > 0)
 				vy_cache_tree_iterator_prev(tree, &pos);
@@ -550,6 +648,14 @@ vy_cache_iterator_restore(struct vy_stmt_iterator *vitr,
 				if (dir > 0 && ((*e)->flags & VY_CACHE_LEFT_LINKED))
 					*stop = true;
 				else if (dir < 0 && ((*e)->flags & VY_CACHE_RIGHT_LINKED))
+					*stop = true;
+				bool iter_is_eq = itr->iterator_type == ITER_EQ ||
+						  (tuple_field_count(itr->key) == 0 &&
+						   itr->iterator_type == ITER_GE);
+				unsigned char key_level = tuple_field_count(itr->key);
+				if (dir > 0 && iter_is_eq && (*e)->left_boundary_level <= key_level)
+					*stop = true;
+				else if (dir < 0 && iter_is_eq && (*e)->right_boundary_level <= key_level)
 					*stop = true;
 			}
 		}
@@ -628,6 +734,7 @@ vy_cache_iterator_open(struct vy_cache_iterator *itr,
 	}
 
 	itr->curr_stmt = NULL;
+	itr->curr_pos = vy_cache_tree_invalid_iterator();
 
 	itr->version = 0;
 	itr->search_started = false;

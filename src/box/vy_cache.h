@@ -59,6 +59,10 @@ struct vy_cache_entry {
 	/* VY_CACHE_LEFT_LINKED and/or VY_CACHE_RIGHT_LINKED, see
 	 * description of them for more information */
 	uint32_t flags;
+	/* Number of parts in key when the value was the first in EQ search */
+	unsigned char left_boundary_level;
+	/* Number of parts in key when the value was the last in EQ search */
+	unsigned char right_boundary_level;
 };
 
 /**
@@ -178,7 +182,8 @@ vy_cache_delete(struct vy_cache *cache);
  */
 void
 vy_cache_add(struct vy_cache *cache, struct tuple *stmt,
-	     struct tuple *prev_stmt, int direction);
+	     struct tuple *prev_stmt, const struct tuple *key,
+	     enum iterator_type order);
 
 /**
  * Invalidate possibly cached value due to its overwriting
@@ -221,6 +226,8 @@ struct vy_cache_iterator {
 	uint32_t version;
 	/* Is false until first .._get or .._next_.. method is called */
 	bool search_started;
+	/* The search was ended with stop == true flag */
+	bool search_end_stopped;
 };
 
 /**
