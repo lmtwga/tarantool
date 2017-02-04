@@ -79,7 +79,7 @@ netbox_prepare_request(lua_State *L, struct mpstream *stream, uint32_t r_type,
 	luamp_encode_uint(cfg, stream, IPROTO_REQUEST_TYPE);
 	luamp_encode_uint(cfg, stream, r_type);
 
-	luamp_encode_uint(cfg, stream, IPROTO_TX_ID);
+	luamp_encode_uint(cfg, stream, IPROTO_TRANSACTION_ID);
 	luamp_encode_uint(cfg, stream, tx_id);
 
 	/* Caller should remember how many bytes was used in ibuf */

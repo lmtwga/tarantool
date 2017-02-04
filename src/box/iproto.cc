@@ -888,16 +888,37 @@ tx_check_schema(uint32_t schema_id)
 	return 0;
 }
 
+struct remote_txn_node {
+	struct region gc;
+	struct txn *txn;
+};
+
 static void
 tx_process1(struct cmsg *m)
 {
 	struct iproto_msg *msg = (struct iproto_msg *) m;
 	struct obuf *out = &msg->iobuf->out;
+	struct session *session = msg->connection->session;
+	struct fiber *fiber = fiber();
+	struct region *region = &fiber->gc;
+	mh_int_t existing_tx;
+	int64_t tx_id;
+	struct remote_txn_node *node = NULL;
+	assert(region_used(region) == 0);
 
-	tx_fiber_init(msg->connection->session, msg->header.sync);
+	tx_fiber_init(session, msg->header.sync);
 	if (tx_check_schema(msg->header.schema_id))
 		goto error;
 
+	tx_id = msg->request.header->tx_id;
+	existing_tx = mh_i64ptr_find(session->transactions, tx_id, NULL);
+	if (existing_tx != mh_end(session->transactions)) {
+		node = (struct remote_txn_node *) mh_i64ptr_node(session->transactions,
+								 existing_tx)->val;
+		region_destroy(region);
+		fiber_set_key(fiber, FIBER_KEY_TXN, node->txn);
+		fiber->gc = node->gc;
+	}
 	struct tuple *tuple;
 	struct obuf_svp svp;
 	if (box_process1(&msg->request, &tuple) ||
@@ -905,14 +926,20 @@ tx_process1(struct cmsg *m)
 		goto error;
 	if (tuple && tuple_to_obuf(tuple, out))
 		goto error;
-	iproto_reply_select(out, &svp, msg->header.sync,
-			    tuple != 0);
+	iproto_reply_select(out, &svp, msg->header.sync, tuple != 0);
 	msg->write_end = obuf_create_svp(out);
-	return;
+	trigger_clear(&node->txn->fiber_on_yield);
+	trigger_clear(&node->txn->fiber_on_stop);
+	goto restore_remote_txn;
 error:
-	iproto_reply_error(out, diag_last_error(&fiber()->diag),
+	iproto_reply_error(out, diag_last_error(&fiber->diag),
 			   msg->header.sync);
 	msg->write_end = obuf_create_svp(out);
+restore_remote_txn:
+	if (node != NULL) {
+		node->gc = fiber->gc;
+		region_create(&fiber->gc, node->gc.cache);
+	}
 }
 
 static void
@@ -921,14 +948,16 @@ tx_process_remote_transaction(struct cmsg *m)
 	struct iproto_msg *msg = (struct iproto_msg *) m;
 	struct obuf *out = &msg->iobuf->out;
 	struct session *session = msg->connection->session;
+	struct fiber *fiber = fiber();
+	struct region *region = &fiber->gc;
 	mh_int_t existing_tx;
-	uint32_t tx_id;
+	int64_t tx_id;
+	assert(region_used(region) == 0);
 
 	tx_fiber_init(session, msg->header.sync);
 	if (tx_check_schema(msg->header.schema_id))
 		goto error;
 	tx_id = msg->request.header->tx_id;
-
 	existing_tx = mh_i64ptr_find(session->transactions, tx_id, NULL);
 
 	if (msg->request.type == IPROTO_BEGIN) {
@@ -940,23 +969,51 @@ tx_process_remote_transaction(struct cmsg *m)
 			goto error;
 		struct txn *txn = in_txn();
 		assert(txn != NULL);
-		fiber_set_key(fiber(), FIBER_KEY_TXN, NULL);
-		const struct mh_i64ptr_node_t node = { tx_id, txn };
-		mh_int_t rc = mh_i64ptr_put(session->transactions, &node, NULL,
-					    NULL);
+		fiber_set_key(fiber, FIBER_KEY_TXN, NULL);
+		struct remote_txn_node *node =
+			(struct remote_txn_node *) region_alloc(region,
+								sizeof(*node));
+		if (node == NULL) {
+			diag_set(OutOfMemory, sizeof(*node), "region_alloc",
+				 "node");
+			goto error;
+		}
+		const struct mh_i64ptr_node_t hash_node = { (uint64_t) tx_id, node };
+		mh_int_t rc = mh_i64ptr_put(session->transactions, &hash_node,
+					    NULL, NULL);
 		if (rc == mh_end(session->transactions)) {
 			diag_set(OutOfMemory, (ssize_t) rc, "malloc", "node");
 			goto error;
 		}
-		iproto_reply_ok(out, msg->header.sync);
-		msg->write_end = obuf_create_svp(out);
-		return;
+		node->gc = *region;
+		node->txn = txn;
+		region_create(region, node->gc.cache);
+		goto ok;
+	} else if (msg->request.type == IPROTO_COMMIT) {
+		if (existing_tx == mh_end(session->transactions))
+			goto ok;
+		struct remote_txn_node *node =
+			(struct remote_txn_node *) mh_i64ptr_node(session->transactions,
+								  existing_tx)->val;
+		region_destroy(region);
+		fiber_set_key(fiber, FIBER_KEY_TXN, node->txn);
+		fiber->gc = node->gc;
+		int rc = box_txn_commit();
+		mh_i64ptr_del(session->transactions, existing_tx, NULL);
+		if (rc != 0)
+			goto error;
+		goto ok;
 	}
 	unreachable();
 error:
-	iproto_reply_error(out, diag_last_error(&fiber()->diag),
+	iproto_reply_error(out, diag_last_error(&fiber->diag),
 			   msg->header.sync);
 	msg->write_end = obuf_create_svp(out);
+	return;
+ok:
+	iproto_reply_ok(out, msg->header.sync);
+	msg->write_end = obuf_create_svp(out);
+	return;
 }
 
 static void

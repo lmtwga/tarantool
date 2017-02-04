@@ -85,7 +85,7 @@ error:
 		case IPROTO_SCHEMA_ID:
 			header->schema_id = mp_decode_uint(pos);
 			break;
-		case IPROTO_TX_ID:
+		case IPROTO_TRANSACTION_ID:
 			header->tx_id = mp_decode_uint(pos);
 			break;
 		default:
@@ -172,7 +172,7 @@ xrow_header_encode(const struct xrow_header *header, struct iovec *out,
 	}
 
 	if (true) {
-		d = mp_encode_uint(d, IPROTO_TX_ID);
+		d = mp_encode_uint(d, IPROTO_TRANSACTION_ID);
 		d = mp_encode_uint(d, header->tx_id);
 		map_size++;
 	}

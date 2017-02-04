@@ -713,12 +713,12 @@ function remote_methods:eval(code, ...)
     return unpack(self:_request('eval', code, {...}))
 end
 
-function remote_methods:begin(tx_id, ...)
-    remote_check(self, 'begin')
+function remote_methods:remote_tx_manage(tx_id, method)
+    remote_check(self, method)
     local deadline = self._deadlines[fiber_self()]
     local timeout = deadline and max(0, deadline-fiber_time())
     local tx_id = fiber_self().id()
-    local err, res = self._transport.perform_request(timeout, 'begin',
+    local err, res = self._transport.perform_request(timeout, method,
                                                      self._schema_id, tx_id)
     if not err or err == E_WRONG_SCHEMA_VERSION then
         return true
@@ -727,9 +727,12 @@ function remote_methods:begin(tx_id, ...)
     end
 end
 
-function remote_methods:commit(tx_id, ...)
-    remote_check(self, 'commit')
-    return unpack(self:_request('commit', tx_id, {...}))
+function remote_methods:begin(tx_id)
+    return self:remote_tx_manage(tx_id, 'begin')
+end
+
+function remote_methods:commit(tx_id)
+    return self:remote_tx_manage(tx_id, 'commit')
 end
 
 function remote_methods:wait_state(state, timeout)
