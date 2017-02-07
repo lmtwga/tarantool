@@ -186,14 +186,14 @@ void
 session_destroy(struct session *);
 
 /** Run on-connect triggers */
-void
+int
 session_run_on_connect_triggers(struct session *session);
 
 /** Run on-disconnect triggers */
 void
 session_run_on_disconnect_triggers(struct session *session);
 
-void
+int
 session_run_on_auth_triggers(const char *user_name);
 
 /*

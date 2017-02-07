@@ -307,6 +307,21 @@ tx_process_join_subscribe(struct cmsg *msg);
 static void
 net_end_join_subscribe(struct cmsg *msg);
 
+static void
+tx_fiber_init(struct session *session, uint64_t sync)
+{
+	session->sync = sync;
+	fiber_set_session(fiber(), session);
+	fiber_set_user(fiber(), &session->credentials);
+}
+
+static void
+tx_fiber_clear(void)
+{
+	fiber_set_session(fiber(), NULL);
+	fiber_set_user(fiber(), NULL);
+}
+
 /**
  * Fire on_disconnect triggers in the tx
  * thread and destroy the session object,
@@ -317,10 +332,12 @@ tx_process_disconnect(struct cmsg *m)
 {
 	struct iproto_msg *msg = (struct iproto_msg *) m;
 	struct iproto_connection *con = msg->connection;
+	tx_fiber_init(con->session, 0);
 	if (con->session) {
 		if (! rlist_empty(&session_on_disconnect))
 			session_run_on_disconnect_triggers(con->session);
 		session_destroy(con->session);
+		tx_fiber_clear();
 		con->session = NULL; /* safety */
 	}
 	/*
@@ -842,14 +859,6 @@ iproto_connection_on_output(ev_loop *loop, struct ev_io *watcher,
 	}
 }
 
-static void
-tx_fiber_init(struct session *session, uint64_t sync)
-{
-	session->sync = sync;
-	fiber_set_session(fiber(), session);
-	fiber_set_user(fiber(), &session->credentials);
-}
-
 static int
 tx_check_schema(uint32_t schema_id)
 {
@@ -881,11 +890,13 @@ tx_process1(struct cmsg *m)
 	iproto_reply_select(out, &svp, msg->header.sync,
 			    tuple != 0);
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 	return;
 error:
 	iproto_reply_error(out, diag_last_error(&fiber()->diag),
 			   msg->header.sync);
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 }
 
 static void
@@ -915,11 +926,13 @@ tx_process_select(struct cmsg *m)
 	port_dump(&port, out);
 	iproto_reply_select(out, &svp, msg->header.sync, port.size);
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 	return;
 error:
 	iproto_reply_error(out, diag_last_error(&fiber()->diag),
 			   msg->header.sync);
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 }
 
 static void
@@ -959,11 +972,13 @@ tx_process_misc(struct cmsg *m)
 				   msg->header.sync);
 	}
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 	return;
 error:
 	iproto_reply_error(out, diag_last_error(&fiber()->diag),
 			   msg->header.sync);
 	msg->write_end = obuf_create_svp(out);
+	tx_fiber_clear();
 }
 
 static void
@@ -996,9 +1011,12 @@ tx_process_join_subscribe(struct cmsg *m)
 		default:
 			unreachable();
 		}
+		tx_fiber_clear();
 	} catch (SocketError *e) {
+		tx_fiber_clear();
 		throw; /* don't write error response to prevent SIGPIPE */
 	} catch (Exception *e) {
+		tx_fiber_clear();
 		iproto_write_error(con->input.fd, e);
 	}
 }
@@ -1053,16 +1071,21 @@ tx_process_connect(struct cmsg *m)
 	struct obuf *out = &msg->iobuf->out;
 	try {              /* connect. */
 		con->session = session_create(con->input.fd);
+		tx_fiber_init(con->session, 0);
 		static __thread char greeting[IPROTO_GREETING_SIZE];
 		/* TODO: dirty read from tx thread */
 		struct tt_uuid uuid = SERVER_UUID;
 		greeting_encode(greeting, tarantool_version_id(),
 				&uuid, con->session->salt, SESSION_SEED_SIZE);
 		obuf_dup_xc(out, greeting, IPROTO_GREETING_SIZE);
-		if (! rlist_empty(&session_on_connect))
-			session_run_on_connect_triggers(con->session);
+		if (! rlist_empty(&session_on_connect)) {
+			if (session_run_on_connect_triggers(con->session))
+				diag_raise();
+		}
 		msg->write_end = obuf_create_svp(out);
+		tx_fiber_clear();
 	} catch (Exception *e) {
+		tx_fiber_clear();
 		iproto_reply_error(out, e, 0 /* zero sync for connect error */);
 		msg->close_connection = true;
 	}
