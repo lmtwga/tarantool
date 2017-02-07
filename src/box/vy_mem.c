@@ -110,8 +110,7 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt)
 }
 
 int
-vy_mem_insert(struct vy_mem *mem, struct tuple_format *mem_format,
-	      const struct tuple *stmt, int64_t alloc_lsn)
+vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt, int64_t alloc_lsn)
 {
 	size_t size = tuple_size(stmt);
 	struct tuple *mem_stmt;
@@ -129,7 +128,6 @@ vy_mem_insert(struct vy_mem *mem, struct tuple_format *mem_format,
 	 * will try to unreference this statement.
 	 */
 	mem_stmt->refs = 0;
-	mem_stmt->format_id = tuple_format_id(mem_format);
 
 	const struct tuple *replaced_stmt = NULL;
 	int rc = vy_mem_tree_insert(&mem->tree, mem_stmt, &replaced_stmt);
@@ -161,7 +159,11 @@ vy_mem_iterator_copy_to(struct vy_mem_iterator *itr, struct tuple **ret)
 	assert(itr->curr_stmt != NULL);
 	if (itr->last_stmt)
 		tuple_unref(itr->last_stmt);
-	itr->last_stmt = vy_stmt_dup(itr->curr_stmt, itr->format);
+	if (tuple_meta_size(itr->curr_stmt) == 0)
+		itr->last_stmt = vy_stmt_dup(itr->curr_stmt, itr->format);
+	else
+		itr->last_stmt = vy_stmt_dup(itr->curr_stmt,
+					     itr->format_with_mask);
 	*ret = itr->last_stmt;
 	if (itr->last_stmt != NULL)
 		return 0;
@@ -326,11 +328,13 @@ void
 vy_mem_iterator_open(struct vy_mem_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_mem *mem, enum iterator_type iterator_type,
 		     const struct tuple *key, const int64_t *vlsn,
-		     struct tuple_format *format)
+		     struct tuple_format *format,
+		     struct tuple_format *format_with_mask)
 {
 	itr->base.iface = &vy_mem_iterator_iface;
 	itr->stat = stat;
 	itr->format = format;
+	itr->format_with_mask = format_with_mask;
 
 	assert(key != NULL);
 	itr->mem = mem;

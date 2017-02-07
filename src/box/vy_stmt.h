@@ -341,13 +341,6 @@ vy_stmt_new_surrogate_delete(struct tuple_format *format,
 			     const struct tuple *tuple);
 
 /**
- * @copydoc vy_stmt_new_surrogate_replace()
- */
-struct tuple *
-vy_stmt_new_surrogate_replace(struct tuple_format *format,
-			      const struct tuple *tuple);
-
-/**
  * Create the REPLACE statement from raw MessagePack data.
  * @param format Format of a tuple for offsets generating.
  * @param tuple_begin MessagePack data that contain an array of fields WITH the
