@@ -308,6 +308,14 @@ fiber_yield(void)
 	struct fiber *callee = caller->caller;
 	caller->caller = &cord->sched;
 
+	if (!(caller->flags & FIBER_IS_CANCELLABLE))
+		/**
+		 * Fiber is in not cancellable state,
+		 * delete the fiber from ready list to prevent
+		 * spurious wakeups.
+		 */
+		rlist_del(&caller->state);
+
 	/** By convention, these triggers must not throw. */
 	if (! rlist_empty(&caller->on_yield))
 		trigger_run(&caller->on_yield, NULL);
