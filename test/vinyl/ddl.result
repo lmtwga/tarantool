@@ -101,6 +101,21 @@ index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
 space:delete({1})
 ---
 ...
+--
+-- Must fail because there are statements in vy_mems.
+--
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+---
+- error: Vinyl does not support altering not empty space
+...
+box.snapshot()
+---
+- ok
+...
+--
+-- After a dump REPLACE + DELETE = nothing, so the space is
+-- naturaly empty now and can be altered.
+--
 index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
 ---
 ...
@@ -119,6 +134,66 @@ index:select{}
 index2:select{}
 ---
 - - [1, 2]
+...
+space:drop()
+---
+...
+space = box.schema.space.create('test', { engine = 'vinyl' })
+---
+...
+index = space:create_index('primary', { run_count_per_level = 2 })
+---
+...
+space:insert({1, 2})
+---
+- [1, 2]
+...
+box.snapshot()
+---
+- ok
+...
+space:delete({1})
+---
+...
+box.snapshot()
+---
+- ok
+...
+--
+-- Must fail because there are statements on disk.
+--
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+---
+- error: Vinyl does not support altering not empty space
+...
+--
+-- Make compaction. During compaction the
+-- REPLACE + DELETE + DELETE = nothing, so the space can be
+-- altered.
+--
+space:delete({1})
+---
+...
+box.snapshot()
+---
+- ok
+...
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+---
+...
+box.begin()
+---
+...
+space:replace({1, 2, 3})
+---
+- [1, 2, 3]
+...
+index3 = space:create_index('third', { parts = {3, 'unsigned'} })
+---
+- error: A multi-statement transaction can not use multiple storage engines
+...
+box.commit()
+---
 ...
 space:drop()
 ---

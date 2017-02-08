@@ -5248,6 +5248,21 @@ fail_user_key_def:
 	return NULL;
 }
 
+int
+vy_prepare_alter_space(struct space *old_space, struct space *new_space)
+{
+	if (old_space->index_count &&
+	    old_space->index_count <= new_space->index_count) {
+		struct vy_index *pk = vy_index(old_space->index[0]);
+		if (vy_status(pk->env) == VINYL_ONLINE && pk->stmt_count != 0) {
+			diag_set(ClientError, ER_UNSUPPORTED, "Vinyl",
+				 "altering not empty space");
+			return -1;
+		}
+	}
+	return 0;
+}
+
 void
 vy_commit_alter_space(struct space *old_space, struct space *new_space)
 {

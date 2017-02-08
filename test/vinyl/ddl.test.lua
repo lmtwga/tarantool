@@ -37,11 +37,46 @@ space:insert({1, 2})
 index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
 #box.space._index:select({space.id})
 space:delete({1})
+--
+-- Must fail because there are statements in vy_mems.
+--
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+box.snapshot()
+--
+-- After a dump REPLACE + DELETE = nothing, so the space is
+-- naturaly empty now and can be altered.
+--
 index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
 #box.space._index:select({space.id})
 space:insert({1, 2})
 index:select{}
 index2:select{}
+space:drop()
+
+space = box.schema.space.create('test', { engine = 'vinyl' })
+index = space:create_index('primary', { run_count_per_level = 2 })
+space:insert({1, 2})
+box.snapshot()
+space:delete({1})
+box.snapshot()
+--
+-- Must fail because there are statements on disk.
+--
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+--
+-- Make compaction. During compaction the
+-- REPLACE + DELETE + DELETE = nothing, so the space can be
+-- altered.
+--
+space:delete({1})
+box.snapshot()
+index2 = space:create_index('secondary', { parts = {2, 'unsigned'} })
+
+box.begin()
+space:replace({1, 2, 3})
+index3 = space:create_index('third', { parts = {3, 'unsigned'} })
+box.commit()
+
 space:drop()
 
 --
